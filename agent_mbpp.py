@@ -16,7 +16,8 @@ import re
 # Temporary development helper from the local moulinette checkout.
 def load_docker_helper():
     helper_path = Path(__file__).resolve().parent / "moulinette/moulinette/mbpp/interact.py"
-    spec = importlib.util.spec_from_file_location("mbpp_docker_helper", helper_path)
+    spec = importlib.util.spec_from_file_location("mbpp_docker_helper",
+                                                  helper_path)
     helper = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(helper)
     run_code_in_docker = helper.run_code_in_docker
@@ -129,7 +130,6 @@ def agent_cycle(agent: Agent, task: MBPPTaskInput) -> SolutionOutput:
             print(cleaned_answer)
             break
 
-
     output = SolutionOutput(
         task_id=str(task.task_id),
         benchmark="mbpp",
@@ -146,6 +146,7 @@ def agent_cycle(agent: Agent, task: MBPPTaskInput) -> SolutionOutput:
     )
     return output
 
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--task-file", required=True, help="Path to the MBPP task JSON file")
@@ -159,7 +160,7 @@ def main():
     start = perf_counter()
 
     output = agent_cycle(smith, task)
-    elapsed = perf_counter() - start
+    # elapsed = perf_counter() - start
     save_solution(args.output, output)
 
 
