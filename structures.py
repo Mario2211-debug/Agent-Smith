@@ -1,8 +1,28 @@
 # ABOUTME: Student-facing Pydantic models for the moulinette evaluation contract.
 # ABOUTME: Students copy this file into their project — it defines the JSON schema the moulinette expects.
 from datetime import datetime
+from dataclasses import dataclass
 from typing import List, Optional
 from pydantic import BaseModel, Field
+
+
+@dataclass
+class ModelResponse:
+    """Provider-independent model output and token usage."""
+
+    text: str
+    input_tokens: int
+    output_tokens: int
+
+
+@dataclass
+class AttemptResult:
+    passed: bool
+    answer: str
+    solution: str
+    output: str
+    stop: bool = False
+    completed: bool = False
 
 
 class StepMetrics(BaseModel):
