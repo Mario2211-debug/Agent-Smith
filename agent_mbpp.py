@@ -1,5 +1,7 @@
-# Run: uv run --env-file .env python -m agent_mbpp --task-file cache/mbpp_task_original.json --output cache/mbpp_solution_120b.json --model-name openai/gpt-oss-120b
-# Moulinette: set -a; source .env; set +a; ./moulinette/quickstart.sh mbpp --student-path . --model-name openai/gpt-oss-120b --provider-url https://api.groq.com/openai/v1
+# Groq: uv run --env-file .env python -m agent_mbpp --task-file cache/mbpp_task_original.json --output cache/mbpp_solution_120b.json --model-name openai/gpt-oss-120b --provider-url https://api.groq.com/openai/v1
+# OpenRouter: uv run --env-file .env python -m agent_mbpp --task-file cache/mbpp_task_original.json --output cache/mbpp_solution_north.json --model-name tencent/hy4-flash --provider-url https://openrouter.ai/api/v1
+# Moulinette Groq: set -a; source .env; set +a; ./moulinette/quickstart.sh mbpp --student-path . --model-name openai/gpt-oss-120b --provider-url https://api.groq.com/openai/v1
+# Moulinette OpenRouter: set -a; source .env; set +a; ./moulinette/quickstart.sh mbpp --student-path . --model-name tencent/hy4-flash --provider-url https://openrouter.ai/api/v1
 import argparse
 import importlib.util
 import json
@@ -12,15 +14,28 @@ from openai import RateLimitError
 from pydantic import ValidationError
 
 from src.APIs.groq import GroqAPI
-from structures import AttemptResult, MBPPTaskInput, SolutionOutput, StepMetrics
+from src.APIs.openrouter import OpenRouterAPI
+from structures import AttemptResult, MBPPTaskInput
+from structures import SolutionOutput, StepMetrics
 
 MAX_ATTEMPTS = 10
 MAX_RATE_LIMIT_RETRIES = 2
 RATE_LIMIT_DELAY_SECONDS = 30
+MODELS = {
+    "https://api.groq.com/openai/v1": {
+        "openai/gpt-oss-120b",
+        "openai/gpt-oss-20b",
+    },
+    "https://openrouter.ai/api/v1": {
+        "cohere/north-mini-code:free",
+        "tencent/hy4-flash",
+        "nvidia/nemotron-3.5-lightning:free",
+    },
+}
 
 
 class MBPPRunner:
-    def __init__(self, agent: GroqAPI, task: MBPPTaskInput):
+    def __init__(self, agent: GroqAPI | OpenRouterAPI, task: MBPPTaskInput):
         self.agent = agent
         self.task = task
         self.total_requests = 0
@@ -202,8 +217,24 @@ def main():
     parser.add_argument("--model-name", default="openai/gpt-oss-120b", help="Model name")
     parser.add_argument("--provider-url", default="https://api.groq.com/openai/v1", help="Provider API URL")
     args = parser.parse_args()
+    if args.provider_url not in MODELS:
+        raise SystemExit(
+            f"Provider URL '{args.provider_url}' is not supported. "
+            f"Supported URLs: {', '.join(MODELS)}"
+        )
+
+    if args.model_name not in MODELS[args.provider_url]:
+        raise SystemExit(
+            f"Model '{args.model_name}' is not supported for "
+            f"provider '{args.provider_url}'. "
+            f"Supported models: {', '.join(sorted(MODELS[args.provider_url]))}"
+        )
+
     task = MBPPRunner.load_task(args.task_file)
-    smith = GroqAPI(args.model_name, args.provider_url)
+    if args.provider_url == "https://api.groq.com/openai/v1":
+        smith = GroqAPI(args.model_name, args.provider_url)
+    else:
+        smith = OpenRouterAPI(args.model_name, args.provider_url)
 
     output = MBPPRunner(smith, task).agent_cycle()
     MBPPRunner.save_solution(args.output, output)
