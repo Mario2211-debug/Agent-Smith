@@ -18,6 +18,7 @@ class GroqAPI:
             model=self.model_name,
             input=prompt,
             temperature=0,
+            reasoning={"effort": "low"},
         )
         if response.usage is None:
             raise ValueError("The provider did not return token usage.")

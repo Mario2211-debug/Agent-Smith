@@ -11,7 +11,7 @@ from time import perf_counter, sleep
 from openai import RateLimitError
 from pydantic import ValidationError
 
-from groq import GroqAPI
+from src.APIs.groq import GroqAPI
 from structures import AttemptResult, MBPPTaskInput, SolutionOutput, StepMetrics
 
 MAX_ATTEMPTS = 10
