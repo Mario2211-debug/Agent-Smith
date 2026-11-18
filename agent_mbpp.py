@@ -2,6 +2,11 @@
 # OpenRouter: uv run --env-file .env python -m agent_mbpp --task-file cache/mbpp_task_original.json --output cache/mbpp_solution_north.json --model-name tencent/hy4-flash --provider-url https://openrouter.ai/api/v1
 # Moulinette Groq: set -a; source .env; set +a; ./moulinette/quickstart.sh mbpp --student-path . --model-name openai/gpt-oss-120b --provider-url https://api.groq.com/openai/v1
 # Moulinette OpenRouter: set -a; source .env; set +a; ./moulinette/quickstart.sh mbpp --student-path . --model-name tencent/hy4-flash --provider-url https://openrouter.ai/api/v1
+r"""Example agent for MBPP tasks using Groq or OpenRouter APIs.
+DOCKER_HOST="unix://$HOME/.docker/run/docker.sock" \
+PATH="/opt/homebrew/opt/coreutils/libexec/gnubin:$PATH" \
+./exams/exam_mbpp.sh --student-path . --moulinette-path moulinette --env-file .env --model-name cohere/north-mini-code:free --provider-url https://openrouter.ai/api/v1
+"""
 import argparse
 import importlib.util
 import json
@@ -35,14 +40,17 @@ MODELS = {
 
 
 class MBPPRunner:
-    def __init__(self, agent: GroqAPI | OpenRouterAPI, task: MBPPTaskInput):
+    def __init__(self, agent: GroqAPI | OpenRouterAPI,
+                 task: MBPPTaskInput, max_iterations: int = MAX_ATTEMPTS):
         self.agent = agent
         self.task = task
+        self.max_iterations = max_iterations
         self.total_requests = 0
         self.total_input_tokens = 0
         self.total_output_tokens = 0
         self.steps: list[StepMetrics] = []
 
+    "TEMPORARY: later we will use our own sandbox"
     @staticmethod
     def load_docker_helper():
         """Load the sandbox implementation supplied with the local moulinette."""
@@ -78,16 +86,19 @@ class MBPPRunner:
         try:
             path = Path(output_file)
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(solution.model_dump_json(indent=4), encoding="utf-8")
+            path.write_text(solution.model_dump_json(indent=4),
+                            encoding="utf-8")
         except OSError as error:
-            raise SystemExit(f"Could not write solution to '{output_file}': {error}") from error
+            raise SystemExit(
+                f"Could not write solution to '{output_file}': {error}"
+            ) from error
 
     def build_prompt(self) -> str:
         return (
             f"{self.task.task_definition}\n"
             f"{self.task.function_definition}\n"
             f"Public tests: {json.dumps(self.task.test_list)}\n"
-            "Implement the requested function correctly, including edge cases. "
+            "Implement the requested function correctly, including edge cases."
             "Prefer a simple, efficient solution. "
             "Return only executable Python code with the required function. "
             "No tests, examples, comments, explanations, or Markdown."
@@ -132,7 +143,8 @@ class MBPPRunner:
             output_tokens = response.output_tokens
             solution = self.extract_code(answer)
             if not solution:
-                output = "The model returned no code. Please generate the complete Python function."
+                output = "The model returned no code. Please generate" \
+                         "the complete Python function."
                 print(output)
             elif self.task.test_list:
                 passed, output, test_code = self.test_solution(solution, run_code_in_docker)
@@ -191,7 +203,7 @@ class MBPPRunner:
         start = perf_counter()
         solution = output = ""
         passed = False
-        for attempt in range(1, MAX_ATTEMPTS + 1):
+        for attempt in range(1, self.max_iterations + 1):
             result = self.run_attempt(attempt, prompt, run_code_in_docker)
             if result.solution:
                 solution = result.solution
@@ -204,7 +216,7 @@ class MBPPRunner:
                 print("Public tests passed." if passed else "Solution generated without public tests.")
                 print(solution)
                 break
-            if attempt == MAX_ATTEMPTS:
+            if attempt == self.max_iterations:
                 print("Max attempts reached. Exiting.")
 
         return self.build_result(attempt, passed, solution, output, prompt, start)
@@ -214,21 +226,24 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--task-file", required=True, help="Path to the MBPP task JSON file")
     parser.add_argument("--output", required=True, help="Path to the output JSON file")
+    parser.add_argument("--max-iterations", "--max_iterations", type=int, default=MAX_ATTEMPTS, help="Maximum number of attempts (1-10)")
     parser.add_argument("--model-name", default="openai/gpt-oss-120b", help="Model name")
     parser.add_argument("--provider-url", default="https://api.groq.com/openai/v1", help="Provider API URL")
     args = parser.parse_args()
     if args.provider_url not in MODELS:
-        raise SystemExit(
+        parser.error(
             f"Provider URL '{args.provider_url}' is not supported. "
             f"Supported URLs: {', '.join(MODELS)}"
         )
 
     if args.model_name not in MODELS[args.provider_url]:
-        raise SystemExit(
+        parser.error(
             f"Model '{args.model_name}' is not supported for "
             f"provider '{args.provider_url}'. "
             f"Supported models: {', '.join(sorted(MODELS[args.provider_url]))}"
         )
+    if not 1 <= args.max_iterations <= MAX_ATTEMPTS:
+        parser.error(f"max_iterations must be between 1 and {MAX_ATTEMPTS}.")
 
     task = MBPPRunner.load_task(args.task_file)
     if args.provider_url == "https://api.groq.com/openai/v1":
@@ -236,7 +251,7 @@ def main():
     else:
         smith = OpenRouterAPI(args.model_name, args.provider_url)
 
-    output = MBPPRunner(smith, task).agent_cycle()
+    output = MBPPRunner(smith, task, args.max_iterations).agent_cycle()
     MBPPRunner.save_solution(args.output, output)
 
 
