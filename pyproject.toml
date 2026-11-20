@@ -7,4 +7,5 @@ dependencies = [
     "google-genai",
     "openai>=3.46.0",
     "pydantic>=2",
+    "tiktoken>=0.12",
 ]
