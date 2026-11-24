@@ -12,3 +12,9 @@ __pycache__/
 .ruff_cache/
 .coverage
 htmlcov/
+
+/Intra Projects Agent Smith Edit.pdf
+/scripts/test_mbpp.py
+/exams/
+/evaluations/
+/Agent Smith/
