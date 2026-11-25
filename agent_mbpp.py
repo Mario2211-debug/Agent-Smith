@@ -1,5 +1,5 @@
-# Groq: uv run --env-file .env python -m agent_mbpp --task-file cache/mbpp_task_original.json --output cache/mbpp_solution_120b.json --model-name openai/gpt-oss-120b --provider-url https://api.groq.com/openai/v1
-# OpenRouter: uv run --env-file .env python -m agent_mbpp --task-file cache/mbpp_task_original.json --output cache/mbpp_solution_north.json --model-name nvidia/nemotron-3-ultra-550b-a55b:free --provider-url https://openrouter.ai/api/v1
+# Groq: uv run --env-file .env python -m agent_mbpp --task-file cache/mbpp_task_407.json --output cache/mbpp_solution_120b.json --model-name openai/gpt-oss-120b --provider-url https://api.groq.com/openai/v1
+# OpenRouter: uv run --env-file .env python -m agent_mbpp --task-file cache/mbpp_task_407.json --output cache/mbpp_solution_north.json --model-name nvidia/nemotron-3-ultra-550b-a55b:free --provider-url https://openrouter.ai/api/v1
 # Moulinette Groq: set -a; source .env; set +a; ./moulinette/quickstart.sh mbpp --student-path . --model-name openai/gpt-oss-120b --provider-url https://api.groq.com/openai/v1
 # Moulinette OpenRouter: set -a; source .env; set +a; ./moulinette/quickstart.sh mbpp --student-path . --model-name nvidia/nemotron-3-ultra-550b-a55b:free --provider-url https://openrouter.ai/api/v1
 """Example agent for MBPP tasks using Groq or OpenRouter APIs.
@@ -50,7 +50,7 @@ MODELS = {
         "openai/gpt-oss-20b",
     },
     "https://openrouter.ai/api/v1": {
-        "cohere/north-mini-code:free",
+        "nvidia/nemotron-3.5-lightning:free",
         "tencent/hy4-flash",
         "nvidia/nemotron-3-ultra-550b-a55b:free",
     },
@@ -81,6 +81,12 @@ class TokenBudgetError(RuntimeError):
 class RequestMetrics:
     request_time_ms: float = 0.0
     retries: int = 0
+
+
+@dataclass
+class SandboxExecution:
+    code: str = ""
+    output: str = ""
 
 
 class MBPPRunner:
@@ -230,7 +236,7 @@ class MBPPRunner:
                     print("Switched to first API key due to rate limit.")
                 switched = True
 
-    def test_solution(self, solution, run_code_in_docker):
+    def test_solution(self, solution, run_code_in_docker, execution: SandboxExecution) -> bool:
         test_code = "\n".join([*self.task.test_imports, solution, *self.task.test_list])
         deadline = START + TASK_TIME_LIMIT_SECONDS - RESULT_WRITE_MARGIN_SECONDS
         remaining = deadline - perf_counter()
@@ -238,17 +244,19 @@ class MBPPRunner:
         if remaining <= 0:
             raise TimeoutError("MBPP time budget exhausted before tests.")
 
-        passed, output = run_code_in_docker(test_code, timeout=min(30.0, remaining))
+        execution.code = test_code
+        passed, execution.output = run_code_in_docker(test_code, timeout=min(30.0, remaining))
 
         if perf_counter() >= deadline:
             raise TimeoutError("MBPP time budget exhausted during tests.")
 
-        return passed, output, test_code
+        return passed
 
     def run_attempt(self, attempt: int, prompt: str, run_code_in_docker) -> AttemptResult:
-        answer = solution = test_code = output = parsing_feedback = ""
+        answer = solution = output = parsing_feedback = ""
         input_tokens = output_tokens = 0
         request_metrics = RequestMetrics()
+        execution = SandboxExecution()
         timestamp = datetime.now().isoformat()
         passed = stop = completed = False
 
@@ -268,7 +276,8 @@ class MBPPRunner:
                 if parsing_feedback:
                     print_diagnostic(parsing_feedback, WARNING_COLOR)
                 if self.task.test_list:
-                    passed, output, test_code = self.test_solution(solution, run_code_in_docker)
+                    passed = self.test_solution(solution, run_code_in_docker, execution)
+                    output = execution.output
                     if not passed:
                         print_diagnostic(f"Public tests failed: {output}")
                 else:
@@ -289,8 +298,8 @@ class MBPPRunner:
             api_url=str(self.agent.client.base_url),
             model_name=self.agent.model_name,
             llm_output=answer,
-            sandbox_input=test_code,
-            sandbox_output=output,
+            sandbox_input=execution.code,
+            sandbox_output=execution.output,
             retries=request_metrics.retries,
         ))
         return AttemptResult(passed, answer, solution, output, stop, completed, parsing_feedback)
