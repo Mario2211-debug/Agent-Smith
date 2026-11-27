@@ -1,17 +1,30 @@
-# Groq: uv run --env-file .env python -m agent_mbpp --task-file cache/mbpp_task_407.json --output cache/mbpp_solution_120b.json --model-name openai/gpt-oss-120b --provider-url https://api.groq.com/openai/v1
-# OpenRouter: uv run --env-file .env python -m agent_mbpp --task-file cache/mbpp_task_407.json --output cache/mbpp_solution_north.json --model-name nvidia/nemotron-3-ultra-550b-a55b:free --provider-url https://openrouter.ai/api/v1
-# Moulinette Groq: set -a; source .env; set +a; ./moulinette/quickstart.sh mbpp --student-path . --model-name openai/gpt-oss-120b --provider-url https://api.groq.com/openai/v1
-# Moulinette OpenRouter: set -a; source .env; set +a; ./moulinette/quickstart.sh mbpp --student-path . --model-name nvidia/nemotron-3-ultra-550b-a55b:free --provider-url https://openrouter.ai/api/v1
-"""Example agent for MBPP tasks using Groq or OpenRouter APIs.
+r"""Run these commands from the project root.
 
-Copy and paste this line into your terminal to run the MBPP exam on macOS:
-cd "$HOME/Agent-Smith" && DOCKER_HOST="unix://$HOME/.docker/run/docker.sock" PATH="/opt/homebrew/opt/coreutils/libexec/gnubin:$PATH" ./exams/exam_mbpp.sh --student-path . --moulinette-path moulinette --env-file .env --model-name nvidia/nemotron-3-ultra-550b-a55b:free --provider-url https://openrouter.ai/api/v1
+Run cached task 407 with GPT-OSS 120B on Groq. The agent opens its own MCP server.
+    uv run --env-file .env python -m agent_mbpp \
+        --task-file cache/mbpp_task_407.json --output cache/mbpp_solution_mcp_120b.json \
+        --model-name openai/gpt-oss-120b --provider-url https://api.groq.com/openai/v1
+
+Run the same task with OpenRouter.
+    uv run --env-file .env python -m agent_mbpp \
+        --task-file cache/mbpp_task_407.json --output cache/mbpp_solution_mcp_hy4.json \
+        --model-name tencent/hy4-flash --provider-url https://openrouter.ai/api/v1
+
+Validate the 120B solution and its metrics with the local Python sandbox.
+    uv run --project moulinette moulinette_eval validate mbpp \
+        cache/mbpp_task_407.json cache/mbpp_solution_mcp_120b.json --mbpp-backend sandbox
+
+Run the five-task MBPP exam with GPT-OSS 120B and local sandbox validation.
+    bash exams/exam_mbpp.sh --student-path . --moulinette-path moulinette \
+        --env-file .env --model-name openai/gpt-oss-120b \
+        --provider-url https://api.groq.com/openai/v1
 """
 import argparse
 import ast
-import importlib.util
+from src.sandbox.sandbox import Sandbox
 import json
 import re
+import shlex
 import sys
 from dataclasses import dataclass
 from datetime import datetime
@@ -24,6 +37,8 @@ from pydantic import ValidationError
 
 from src.APIs.groq import GroqAPI
 from src.APIs.openrouter import OpenRouterAPI
+from src.mcp.client import MCPClient
+from src.sandbox.result import ExecutionResult
 from structures import AttemptResult, MBPPTaskInput, ModelResponse
 from structures import SolutionOutput, StepMetrics
 
@@ -41,8 +56,20 @@ RESET_COLOR = "\033[0m"
 SYSTEM_PROMPT = (
     "Implement the requested function correctly, including edge cases. "
     "Prefer a simple, efficient solution. "
-    "Return only executable Python code with the required function. "
-    "No tests, examples, comments, explanations, or Markdown."
+    "Return one fenced Python block as your text response. The runner executes it "
+    "locally in a persistent sandbox. Write run_tests and final_answer as normal "
+    "Python calls inside that block. Do not emit API tool calls.\n\n"
+    "The sandbox already defines run_tests and final_answer. Never redefine them "
+    "or write your own tests. Put the requested function only inside the string code. "
+    "Keep the solution short, with no comments or docstrings.\n\n"
+    "Example testing step when public tests are available:\n"
+    "```python\ncode = 'def add(a, b): return a + b'\n"
+    "print(run_tests(code))\n```\n\n"
+    "Wait for the observation. If the tests fail, update code and retest. "
+    "If they pass, your entire next response is:\n"
+    "```python\nfinal_answer(code)\n```\n"
+    "Pass the source string to final_answer, never the function object. "
+    "If there are no public tests, define code and call final_answer(code) in the same block."
 )
 MODELS = {
     "https://api.groq.com/openai/v1": {
@@ -91,7 +118,9 @@ class SandboxExecution:
 
 class MBPPRunner:
     def __init__(self, agent: GroqAPI | OpenRouterAPI,
-                 task: MBPPTaskInput, max_iterations: int = MAX_ATTEMPTS):
+                 task: MBPPTaskInput,
+                 client: MCPClient,
+                 max_iterations: int = MAX_ATTEMPTS,):
         self.agent = agent
         self.task = task
         self.max_iterations = max_iterations
@@ -99,18 +128,7 @@ class MBPPRunner:
         self.total_input_tokens = 0
         self.total_output_tokens = 0
         self.steps: list[StepMetrics] = []
-
-    "TEMPORARY: later we will use our own sandbox"
-    @staticmethod
-    def load_docker_helper():
-        """Load the sandbox implementation supplied with the local moulinette."""
-        helper_path = Path(__file__).resolve().parent / "moulinette/moulinette/mbpp/interact.py"
-        spec = importlib.util.spec_from_file_location("mbpp_docker_helper", helper_path)
-        if spec is None or spec.loader is None:
-            raise RuntimeError(f"Could not load sandbox helper from {helper_path}")
-        helper = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(helper)
-        return helper.run_code_in_docker
+        self.mcp = client
 
     @staticmethod
     def extract_code(text: str) -> tuple[str, str]:
@@ -133,10 +151,10 @@ class MBPPRunner:
             tree = ast.parse(code)
             compile(tree, "<model response>", "exec")
         except SyntaxError as error:
-            return "", f"No valid Python code found ({error.msg}). Return the complete Python function."
+            return "", f"No valid Python code found ({error.msg}). Return executable Python code."
 
-        if not any(isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) for node in tree.body):
-            return "", "No Python function found in the response. Return the complete Python function."
+        if not tree.body:
+            return "", "No executable Python code found in the response."
         return code, feedback
 
     @staticmethod
@@ -236,23 +254,31 @@ class MBPPRunner:
                     print("Switched to first API key due to rate limit.")
                 switched = True
 
-    def test_solution(self, solution, run_code_in_docker, execution: SandboxExecution) -> bool:
-        test_code = "\n".join([*self.task.test_imports, solution, *self.task.test_list])
+    def test_solution(self, code: str, execution: SandboxExecution, sandbox: Sandbox) -> ExecutionResult:
         deadline = START + TASK_TIME_LIMIT_SECONDS - RESULT_WRITE_MARGIN_SECONDS
         remaining = deadline - perf_counter()
 
         if remaining <= 0:
             raise TimeoutError("MBPP time budget exhausted before tests.")
 
-        execution.code = test_code
-        passed, execution.output = run_code_in_docker(test_code, timeout=min(30.0, remaining))
+        execution.code = code
+        result = sandbox.execute(code, timeout=min(30.0, remaining))
+        if result.final_answer is not None:
+            source, feedback = self.extract_code(result.final_answer)
+            result.final_answer = source or None
+            if not source:
+                result.error = (
+                    "Invalid submission. Pass the complete Python source as a string "
+                    "to final_answer(code). Do not pass the function object. " + feedback
+                )
+        execution.output = result.to_observation()
 
         if perf_counter() >= deadline:
             raise TimeoutError("MBPP time budget exhausted during tests.")
 
-        return passed
+        return result
 
-    def run_attempt(self, attempt: int, prompt: str, run_code_in_docker) -> AttemptResult:
+    def run_attempt(self, attempt: int, prompt: str, sandbox: Sandbox) -> AttemptResult:
         answer = solution = output = parsing_feedback = ""
         input_tokens = output_tokens = 0
         request_metrics = RequestMetrics()
@@ -267,22 +293,17 @@ class MBPPRunner:
             timestamp = datetime.now().isoformat()
             input_tokens = response.input_tokens
             output_tokens = response.output_tokens
-            solution, parsing_feedback = self.extract_code(answer)
-            if not solution:
+            code, parsing_feedback = self.extract_code(answer)
+            if not code:
                 output = parsing_feedback
                 parsing_feedback = ""
                 print_diagnostic(output)
             else:
-                if parsing_feedback:
-                    print_diagnostic(parsing_feedback, WARNING_COLOR)
-                if self.task.test_list:
-                    passed = self.test_solution(solution, run_code_in_docker, execution)
-                    output = execution.output
-                    if not passed:
-                        print_diagnostic(f"Public tests failed: {output}")
-                else:
-                    print("No public tests available; skipping execution.")
-                    output = "No public tests available."
+                result = self.test_solution(code, execution, sandbox)
+                output = execution.output
+                if result.is_final:
+                    solution = result.final_answer or ""
+                    passed = True
             completed = True
         except Exception as error:
             print_diagnostic(f"Attempt {attempt} failed: {error}")
@@ -324,30 +345,26 @@ class MBPPRunner:
 
     def agent_cycle(self) -> SolutionOutput:
         prompt = self.build_prompt()
-        try:
-            run_code_in_docker = self.load_docker_helper()
-        except Exception as error:
-            raise SystemExit(f"Could not load Docker helper: {error}") from error
-
         solution = output = ""
         passed = False
-        for attempt in range(1, self.max_iterations + 1):
-            result = self.run_attempt(attempt, prompt, run_code_in_docker)
-            if result.solution:
-                solution = result.solution
-            passed, output = result.passed, result.output
-            if result.completed and not passed and (self.task.test_list or not result.solution):
-                if result.parsing_feedback:
-                    prompt += f"\n{result.parsing_feedback}"
-                prompt += f"\nError: {output}\nFix this."
-            if result.stop:
-                break
-            if passed or (not self.task.test_list and result.solution):
-                print("Public tests passed." if passed else "Solution generated without public tests.")
-                print(solution)
-                break
-            if attempt == self.max_iterations:
-                print_diagnostic("Max attempts reached. Exiting.")
+        with Sandbox(mcp=self.mcp) as sandbox:
+            for attempt in range(1, self.max_iterations + 1):
+                result = self.run_attempt(attempt, prompt, sandbox)
+                if result.solution:
+                    solution = result.solution
+                passed, output = result.passed, result.output
+                if result.completed and not passed:
+                    if result.parsing_feedback:
+                        prompt += f"\n{result.parsing_feedback}"
+                    prompt += f"\nObservation:\n{output}"
+                if result.stop:
+                    break
+                if passed:
+                    print("Solution submitted.")
+                    print(solution)
+                    break
+                if attempt == self.max_iterations:
+                    print_diagnostic("Max attempts reached. Exiting.")
 
         return self.build_result(attempt, passed, solution, output)
 
@@ -381,7 +398,16 @@ def main():
     else:
         smith = OpenRouterAPI(args.model_name, args.provider_url)
 
-    output = MBPPRunner(smith, task, args.max_iterations).agent_cycle()
+    server = Path(__file__).resolve().with_name("mcp_tools_mbpp.py")
+    # Build the MCP server command with the current Python
+    # and quote paths with spaces.
+    command = shlex.join([sys.executable, str(server),
+                          "--task-file", args.task_file])
+    # MCP reads the command from stdin and starts the server,
+    # then the client connects to it.
+    with MCPClient.stdio(command) as client:
+        output = MBPPRunner(smith, task, client,
+                            args.max_iterations,).agent_cycle()
     MBPPRunner.save_solution(args.output, output)
 
 
