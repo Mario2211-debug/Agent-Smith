@@ -16,9 +16,8 @@ from typing import Any, Optional
 from src.sandbox.config import SandboxSettings
 from src.sandbox.sandbox import Sandbox
 
-HELP_TEXT = """Commands: :manual  show the LLM manual   :tools  list MCP tools
-          :help    this help            :quit   exit
-Type Python code; a blank line ends a multi-line block."""
+HELP_TEXT = """\n\nCommands:\n \n:manual show the LLM manual \n:tools list MCP tools \n:help this help \n:quit exit
+\nType Python code; a blank line ends a multi-line block."""
 
 
 def parse_args(argv: Optional[list] = None) -> argparse.Namespace:
@@ -94,7 +93,7 @@ def interactive(sandbox: Sandbox) -> None:
         if block is None or block in (":quit", ":q", ":exit"):
             break
         if block == ":manual":
-            print(sandbox.manual())
+            print("\n", sandbox.manual())
         elif block == ":tools":
             print("\n".join(t.signature for t in sandbox.tools)
                   or "No MCP tools.")
